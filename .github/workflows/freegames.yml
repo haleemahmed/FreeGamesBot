@@ -2,8 +2,8 @@ name: Daily Free Game Updates
 
 on:
   schedule:
-    - cron: '30 4 * * 0-6'  # 🕓 Runs at 10:00 AM IST (Sun–Sat)
-  workflow_dispatch:  # Allows manual trigger too
+    - cron: '30 5 * * 0-6'  # Runs daily at 10:00 AM IST (UTC 04:30)
+  workflow_dispatch:
 
 jobs:
   post-free-games:
@@ -11,7 +11,7 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -20,9 +20,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install discord.py requests
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run the bot
+      - name: Run FreeGames Bot (action mode)
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          RUN_MODE: action
+          MENTION_ON_NEW: "false"   # set to "true" if you want @everyone mentions
         run: python bot.py
