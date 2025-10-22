@@ -1,7 +1,7 @@
-import discord
-import requests
-from bs4 import BeautifulSoup
 import os
+import discord
+import aiohttp
+from bs4 import BeautifulSoup
 from datetime import datetime
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -10,141 +10,105 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
+# ---------- FETCH FUNCTIONS ---------- #
 
-# ---------- EPIC GAMES (API-BASED) ----------
-def fetch_epic_games():
-    url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=en-US"
-    res = requests.get(url)
-    data = res.json()
+async def fetch_epic_games(session):
+    url = "https://store.epicgames.com/en-US/free-games"
+    async with session.get(url) as response:
+        soup = BeautifulSoup(await response.text(), "html.parser")
+        games = []
 
-    free_games, discount_games = [], []
+        for item in soup.select("section div div div a[href*='/p/']"):
+            title = item.text.strip()
+            if title and title not in games:
+                games.append(title)
 
-    for game in data["data"]["Catalog"]["searchStore"]["elements"]:
-        title = game["title"]
-        url_slug = game["productSlug"] or game["catalogNs"]["mappings"][0]["pageSlug"]
-        link = f"https://store.epicgames.com/en-US/p/{url_slug}"
-
-        price_info = game.get("price", {}).get("totalPrice", {})
-        discount_percentage = price_info.get("discountPercentage", 0)
-
-        # Free game
-        if price_info.get("originalPrice", 0) != 0 and price_info.get("discountPrice", 0) == 0:
-            free_games.append((title, link))
-        # Discount >= 50%
-        elif discount_percentage >= 50:
-            final_price = price_info.get("fmtPrice", {}).get("discountPrice", "")
-            discount_games.append((title, link, f"{discount_percentage}% Off (Now {final_price})"))
-
-    return free_games, discount_games
+        return list(set(games))[:5]  # limit top 5
 
 
-# ---------- STEAM (HTML SCRAPE) ----------
-def fetch_steam_games():
-    url = "https://store.steampowered.com/search/?specials=1&cc=in"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
+async def fetch_steam_games(session):
+    url = "https://store.steampowered.com/search/?filter=free&specials=1"
+    async with session.get(url) as response:
+        soup = BeautifulSoup(await response.text(), "html.parser")
+        games = []
 
-    free_games, discount_games = [], []
-
-    for row in soup.select(".search_result_row"):
-        title = row.select_one(".title").get_text(strip=True)
-        link = row.get("href")
-        discount_el = row.select_one(".search_discount span")
-        price_el = row.select_one(".discount_final_price")
-
-        if not discount_el:
-            continue
-        discount_text = discount_el.get_text(strip=True).replace("-", "")
-        if discount_text == "100%":
-            free_games.append((title, link))
-        elif discount_text.endswith("%") and int(discount_text[:-1]) >= 50:
-            price = price_el.get_text(strip=True) if price_el else ""
-            discount_games.append((title, link, f"{discount_text} Off (Now {price})"))
-
-    return free_games, discount_games
+        for row in soup.select("a.search_result_row"):
+            title = row.select_one(".title")
+            discount = row.select_one(".search_discount span")
+            if title:
+                game_name = title.text.strip()
+                if discount and "%" in discount.text:
+                    percent = int(discount.text.replace("%", "").replace("-", "").strip())
+                    if percent >= 50:
+                        games.append(f"{game_name} ({percent}% off)")
+                else:
+                    games.append(f"{game_name} (Free)")
+        return games[:5]
 
 
-# ---------- UBISOFT (API-BASED) ----------
-def fetch_ubisoft_games():
-    url = "https://store.ubisoft.com/api/v1/products?categories=ON_SALE&locale=en_IN&limit=50"
-    res = requests.get(url)
-    data = res.json()
+async def fetch_ubisoft_games(session):
+    url = "https://store.ubisoft.com/in/deals"
+    async with session.get(url) as response:
+        soup = BeautifulSoup(await response.text(), "html.parser")
+        games = []
+        for product in soup.select("div.product-tile__title"):
+            title = product.text.strip()
+            if title:
+                games.append(title)
+        return games[:5]
 
-    free_games, discount_games = [], []
+# ---------- MAIN POST FUNCTION ---------- #
 
-    for product in data.get("products", []):
-        title = product.get("name")
-        link = f"https://store.ubisoft.com/in/{product.get('url').lstrip('/')}"
-        discount = product.get("discount", 0)
-        price = product.get("price", {}).get("final", "")
-        currency = product.get("price", {}).get("currency", "")
+async def post_free_games():
+    async with aiohttp.ClientSession() as session:
+        epic = await fetch_epic_games(session)
+        steam = await fetch_steam_games(session)
+        ubi = await fetch_ubisoft_games(session)
 
-        if discount == 100:
-            free_games.append((title, link))
-        elif discount >= 50:
-            discount_games.append((title, link, f"{discount}% Off (Now {currency} {price})"))
+        # Debug info
+        print(f"Epic Games: {epic}")
+        print(f"Steam Games: {steam}")
+        print(f"Ubisoft Games: {ubi}")
 
-    return free_games, discount_games
+        message_lines = [f"🎁 **Free & Discounted Games of the Day ({datetime.now().strftime('%Y-%m-%d')})**",
+                         "Grab these Free and ≥50% Off games before they expire!\n"]
 
+        if epic:
+            message_lines.append("🔥 **Epic Games**")
+            for g in epic:
+                message_lines.append(f"🕹️ {g}")
+            message_lines.append("")
 
-# ---------- MESSAGE BUILDER ----------
-def build_message(epic, steam, ubi):
-    today = datetime.now().strftime("%Y-%m-%d")
+        if steam:
+            message_lines.append("🔥 **Steam**")
+            for g in steam:
+                message_lines.append(f"🕹️ {g}")
+            message_lines.append("")
 
-    msg = f"🎁 **Free & Discounted Games of the Day** ({today})\nGrab these **Free** and **≥50% Off** games before they expire!\n\n"
+        if ubi:
+            message_lines.append("🔥 **Ubisoft**")
+            for g in ubi:
+                message_lines.append(f"🕹️ {g}")
+            message_lines.append("")
 
-    def section(name, free, deals):
-        part = f"🔥 **{name}**\n"
-        if free:
-            part += "🆓 **Free Games**\n"
-            for t, l in free[:5]:
-                part += f"• [{t}]({l})\n"
-        if deals:
-            part += "\n💸 **Big Discounts (≥50%)**\n"
-            for t, l, d in deals[:5]:
-                part += f"• [{t}]({l}) — **{d}**\n"
-        return part + "\n\n"
+        message_lines.append("🕓 Auto-updated daily | Epic • Steam • Ubisoft 🎮")
 
-    msg += section("Epic Games", *epic)
-    msg += section("Steam", *steam)
-    msg += section("Ubisoft", *ubi)
-    msg += "🕓 Auto-updated daily | Epic • Steam • Ubisoft 🎮"
-    return msg
+        if not (epic or steam or ubi):
+            message_lines.insert(1, "_No currently free or ≥50% discounted games found._")
+
+        channel = client.get_channel(CHANNEL_ID)
+        if channel:
+            await channel.send("\n".join(message_lines))
+        else:
+            print("❌ Channel not found! Check CHANNEL_ID.")
 
 
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
-    channel = client.get_channel(CHANNEL_ID)
-    if not channel:
-        print("❌ Invalid channel ID.")
-        await client.close()
-        return
-
-    print("Fetching Epic Games...")
-    epic = fetch_epic_games()
-    print("Fetching Steam Games...")
-    steam = fetch_steam_games()
-    print("Fetching Ubisoft Games...")
-    ubi = fetch_ubisoft_games()
-
-    msg = build_message(epic, steam, ubi)
-
-    embed = discord.Embed(
-        title="🎮 Free & Discounted Games",
-        description=msg,
-        color=discord.Color.gold(),
-        timestamp=datetime.now()
-    )
-    embed.set_footer(text="Auto-updated daily | Epic • Steam • Ubisoft 🎮")
-
-    await channel.send(embed=embed)
+    await post_free_games()
     await client.close()
 
 
 if __name__ == "__main__":
-    if not TOKEN or CHANNEL_ID == 0:
-        print("❌ Missing TOKEN or CHANNEL_ID environment variables.")
-    else:
-        client.run(TOKEN)
+    client.run(TOKEN)
