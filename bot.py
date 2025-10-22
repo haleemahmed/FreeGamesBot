@@ -4,7 +4,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 from discord import Embed
 
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 MESSAGE_FILE = "last_message_id.txt"
 
@@ -155,3 +155,4 @@ async def on_ready():
 
 
 client.run(TOKEN)
+
