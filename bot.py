@@ -11,36 +11,34 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 
-# ---------- EPIC GAMES ----------
+# ---------- EPIC GAMES (API-BASED) ----------
 def fetch_epic_games():
-    url = "https://store.epicgames.com/en-US/free-games"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
+    url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=en-US"
+    res = requests.get(url)
+    data = res.json()
 
     free_games, discount_games = [], []
 
-    for card in soup.select("a.css-1jx3eyg"):
-        title = card.select_one(".css-2ucwu")
-        if not title:
-            continue
-        title = title.get_text(strip=True)
-        link = f"https://store.epicgames.com{card['href']}"
+    for game in data["data"]["Catalog"]["searchStore"]["elements"]:
+        title = game["title"]
+        url_slug = game["productSlug"] or game["catalogNs"]["mappings"][0]["pageSlug"]
+        link = f"https://store.epicgames.com/en-US/p/{url_slug}"
 
-        price_el = card.select_one(".css-rgqwpc, .css-1x9zltl")
-        price_text = price_el.get_text(strip=True) if price_el else ""
+        price_info = game.get("price", {}).get("totalPrice", {})
+        discount_percentage = price_info.get("discountPercentage", 0)
 
-        if "Free" in price_text:
+        # Free game
+        if price_info.get("originalPrice", 0) != 0 and price_info.get("discountPrice", 0) == 0:
             free_games.append((title, link))
-        elif "%" in price_text:
-            discount = price_text.replace("-", "")
-            if discount.endswith("%") and int(discount[:-1]) >= 50:
-                discount_games.append((title, link, f"{discount} Off"))
+        # Discount >= 50%
+        elif discount_percentage >= 50:
+            final_price = price_info.get("fmtPrice", {}).get("discountPrice", "")
+            discount_games.append((title, link, f"{discount_percentage}% Off (Now {final_price})"))
 
     return free_games, discount_games
 
 
-# ---------- STEAM ----------
+# ---------- STEAM (HTML SCRAPE) ----------
 def fetch_steam_games():
     url = "https://store.steampowered.com/search/?specials=1&cc=in"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -67,33 +65,25 @@ def fetch_steam_games():
     return free_games, discount_games
 
 
-# ---------- UBISOFT ----------
+# ---------- UBISOFT (API-BASED) ----------
 def fetch_ubisoft_games():
-    url = "https://store.ubisoft.com/in/deals"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
+    url = "https://store.ubisoft.com/api/v1/products?categories=ON_SALE&locale=en_IN&limit=50"
+    res = requests.get(url)
+    data = res.json()
 
     free_games, discount_games = [], []
 
-    for card in soup.select(".product-card"):
-        title_el = card.select_one(".product-card-title")
-        discount_el = card.select_one(".discount-percentage")
-        price_el = card.select_one(".price-item")
-        link_el = card.find("a", href=True)
+    for product in data.get("products", []):
+        title = product.get("name")
+        link = f"https://store.ubisoft.com/in/{product.get('url').lstrip('/')}"
+        discount = product.get("discount", 0)
+        price = product.get("price", {}).get("final", "")
+        currency = product.get("price", {}).get("currency", "")
 
-        if not title_el or not discount_el or not link_el:
-            continue
-
-        title = title_el.get_text(strip=True)
-        link = f"https://store.ubisoft.com{link_el['href']}"
-        discount_text = discount_el.get_text(strip=True).replace("-", "")
-
-        if discount_text == "100%":
+        if discount == 100:
             free_games.append((title, link))
-        elif discount_text.endswith("%") and int(discount_text[:-1]) >= 50:
-            price = price_el.get_text(strip=True) if price_el else ""
-            discount_games.append((title, link, f"{discount_text} Off (Now {price})"))
+        elif discount >= 50:
+            discount_games.append((title, link, f"{discount}% Off (Now {currency} {price})"))
 
     return free_games, discount_games
 
