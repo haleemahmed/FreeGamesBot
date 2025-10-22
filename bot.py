@@ -1,155 +1,157 @@
 import os
-import requests
 import discord
-from discord.ext import commands
-from datetime import datetime
+import aiohttp
+from bs4 import BeautifulSoup
+from discord import Embed
 
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
+MESSAGE_FILE = "last_message_id.txt"
 
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# ----------------------------
-# 🧩 Helper functions per store
-# ----------------------------
-
-def fetch_epic_games():
-    try:
-        url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
-        data = requests.get(url, timeout=10).json()
-        games = []
-        for game in data["data"]["Catalog"]["searchStore"]["elements"]:
-            title = game["title"]
-            desc = game.get("description", "Free on Epic Games Store")
-            offer = game.get("promotions")
-            free_until = "Currently Free"
-            if offer and offer.get("promotionalOffers"):
-                end_date = offer["promotionalOffers"][0]["promotionalOffers"][0]["endDate"]
-                free_until = datetime.fromisoformat(end_date[:-1]).strftime("%b %d, %Y")
-            image = game["keyImages"][0]["url"] if game.get("keyImages") else None
-            url_game = f"https://store.epicgames.com/en-US/p/{game['productSlug'].split('/')[0]}" if game.get("productSlug") else "https://store.epicgames.com/en-US/"
-            games.append({
-                "title": title,
-                "desc": desc,
-                "free_until": free_until,
-                "url": url_game,
-                "image": image
-            })
-        return games
-    except Exception:
-        return []
+client = discord.Client(intents=intents)
 
 
-def fetch_gog_games():
-    try:
-        resp = requests.get("https://www.gog.com/games/ajax/filtered?mediaType=game&price=free", timeout=10)
-        data = resp.json()
-        games = []
-        for game in data["products"]:
-            games.append({
-                "title": game["title"],
-                "desc": "Free to own on GOG",
-                "free_until": "Permanent Free",
-                "url": f"https://www.gog.com{game['url']}",
-                "image": game["image"]
-            })
-        return games
-    except Exception:
-        return []
+async def fetch_epic_free_games():
+    """Scrape Epic Games free games page."""
+    url = "https://store.epicgames.com/en-US/free-games"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            html = await response.text()
+            soup = BeautifulSoup(html, "html.parser")
+            games = []
+            for item in soup.select("div.css-1myhtyb"):
+                title = item.select_one("h3")
+                link = item.find("a")
+                img = item.select_one("img")
+                if title and link:
+                    games.append({
+                        "store": "Epic Games",
+                        "title": title.get_text(strip=True),
+                        "link": "https://store.epicgames.com" + link["href"],
+                        "img": img["src"] if img else None
+                    })
+            return games
 
 
-def fetch_steam_games():
-    try:
-        resp = requests.get("https://store.steampowered.com/api/featuredcategories", timeout=10)
-        data = resp.json()
-        games = []
-        for g in data["specials"]["items"]:
-            if g.get("discounted") and g["final_price"] == 0:
+async def fetch_steam_free_games():
+    """Scrape Steam specials page for free games."""
+    url = "https://store.steampowered.com/search/?filter=free&specials=1"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            html = await response.text()
+            soup = BeautifulSoup(html, "html.parser")
+            games = []
+            for item in soup.select(".search_result_row"):
+                title = item.select_one(".title")
+                link = item["href"]
+                img = item.select_one("img")
+                if title:
+                    games.append({
+                        "store": "Steam",
+                        "title": title.get_text(strip=True),
+                        "link": link,
+                        "img": img["src"] if img else None
+                    })
+            return games[:5]  # Limit to top 5
+            
+
+async def fetch_ubisoft_free_games():
+    """Scrape Ubisoft free games page."""
+    url = "https://store.ubisoft.com/us/free-games"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            html = await response.text()
+            soup = BeautifulSoup(html, "html.parser")
+            games = []
+            for item in soup.select(".category-game-card__title"):
+                title = item.get_text(strip=True)
+                parent = item.find_parent("a")
+                link = parent["href"] if parent else None
+                if link and not link.startswith("http"):
+                    link = "https://store.ubisoft.com" + link
                 games.append({
-                    "title": g["name"],
-                    "desc": "Free for a limited time on Steam",
-                    "free_until": "Limited Offer",
-                    "url": g["store_url"],
-                    "image": g["header_image"]
+                    "store": "Ubisoft",
+                    "title": title,
+                    "link": link,
+                    "img": None
                 })
-        return games
-    except Exception:
-        return []
+            return games[:5]
+            
 
-
-def fetch_prime_gaming():
-    try:
-        resp = requests.get("https://gaming.amazon.com/home", timeout=10)
-        if resp.status_code != 200:
-            return []
-        # Simplified: Prime doesn’t have a public API, so we’ll just link the homepage.
-        return [{
-            "title": "Prime Gaming Free Games",
-            "desc": "Check out this month’s free titles with Amazon Prime.",
-            "free_until": "Varies",
-            "url": "https://gaming.amazon.com/home",
-            "image": "https://upload.wikimedia.org/wikipedia/commons/3/37/Prime_Gaming_logo.svg"
-        }]
-    except Exception:
-        return []
-
-# ----------------------------
-# 🎨 Build rich embed messages
-# ----------------------------
-
-def make_embed(store, color, logo_url, games):
-    embed = discord.Embed(
-        title=f"🎮 {store} Free Games",
-        description=f"Here are the current free games available on {store}!",
-        color=color,
-        timestamp=datetime.utcnow()
+async def build_embed(epic_games, steam_games, ubisoft_games):
+    embed = Embed(
+        title="🎁 Free Games of the Day",
+        description="Grab these limited-time or always-free games from major stores!",
+        color=0x00ff99,
     )
-    embed.set_thumbnail(url=logo_url)
 
-    for g in games[:5]:  # limit to 5 per store
-        embed.add_field(
-            name=f"🕹️ {g['title']}",
-            value=f"{g['desc']}\n**Free Until:** {g['free_until']}\n[👉 Get it here]({g['url']})",
-            inline=False
-        )
-    embed.set_footer(text="Posted by FreeGamesBot 🎮")
+    # Epic Games section
+    if epic_games:
+        embed.add_field(name="🧱 Epic Games Store", value="\u200b", inline=False)
+        for g in epic_games[:3]:
+            embed.add_field(
+                name=f"🎮 {g['title']}",
+                value=f"[Claim here]({g['link']})",
+                inline=False,
+            )
+
+    # Steam section
+    if steam_games:
+        embed.add_field(name="🔥 Steam Free Games", value="\u200b", inline=False)
+        for g in steam_games[:3]:
+            embed.add_field(
+                name=f"🕹️ {g['title']}",
+                value=f"[Get on Steam]({g['link']})",
+                inline=False,
+            )
+
+    # Ubisoft section
+    if ubisoft_games:
+        embed.add_field(name="🧩 Ubisoft Connect", value="\u200b", inline=False)
+        for g in ubisoft_games[:3]:
+            embed.add_field(
+                name=f"🎯 {g['title']}",
+                value=f"[Claim now]({g['link']})",
+                inline=False,
+            )
+
+    # Thumbnail and footer
+    if epic_games and epic_games[0].get("img"):
+        embed.set_thumbnail(url=epic_games[0]["img"])
+    embed.set_footer(text="Auto-updated daily | Epic • Steam • Ubisoft 🎮")
+
     return embed
 
-# ----------------------------
-# 🤖 Bot command + daily task
-# ----------------------------
 
-async def post_free_games(channel):
-    stores = [
-        ("Epic Games Store", 0x6A5ACD, "https://upload.wikimedia.org/wikipedia/commons/3/31/Epic_Games_logo.svg", fetch_epic_games),
-        ("Steam", 0x1B2838, "https://upload.wikimedia.org/wikipedia/commons/8/83/Steam_icon_logo.svg", fetch_steam_games),
-        ("GOG", 0x6A0DAD, "https://upload.wikimedia.org/wikipedia/commons/7/78/GOG.com_logo.svg", fetch_gog_games),
-        ("Prime Gaming", 0x6441A5, "https://upload.wikimedia.org/wikipedia/commons/3/37/Prime_Gaming_logo.svg", fetch_prime_gaming),
-    ]
-
-    for store_name, color, logo, fetch_func in stores:
-        games = fetch_func()
-        if not games:
-            continue
-        embed = make_embed(store_name, color, logo, games)
-        await channel.send(content="@everyone", embed=embed)
-
-@bot.command(name="freegames")
-async def freegames(ctx):
-    await ctx.send("Fetching the latest free games... 🎮")
-    await post_free_games(ctx.channel)
-
-@bot.event
+@client.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    channel = bot.get_channel(CHANNEL_ID)
-    if channel:
-        await post_free_games(channel)
-    else:
-        print("⚠️ Channel not found. Check your CHANNEL_ID.")
+    print(f"✅ Logged in as {client.user}")
+    channel = client.get_channel(CHANNEL_ID)
 
-# ----------------------------
-# 🚀 Run the bot
-# ----------------------------
-bot.run(TOKEN)
+    epic_games = await fetch_epic_free_games()
+    steam_games = await fetch_steam_free_games()
+    ubisoft_games = await fetch_ubisoft_free_games()
+
+    embed = await build_embed(epic_games, steam_games, ubisoft_games)
+
+    last_message_id = None
+    if os.path.exists(MESSAGE_FILE):
+        with open(MESSAGE_FILE, "r") as f:
+            last_message_id = f.read().strip()
+
+    try:
+        if last_message_id:
+            msg = await channel.fetch_message(int(last_message_id))
+            await msg.edit(embed=embed)
+            print("🔁 Message updated successfully.")
+        else:
+            msg = await channel.send(embed=embed)
+            with open(MESSAGE_FILE, "w") as f:
+                f.write(str(msg.id))
+            print("✅ First message posted successfully.")
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+
+
+client.run(TOKEN)
